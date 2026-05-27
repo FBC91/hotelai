@@ -3,12 +3,6 @@ hotelai.server
 ===============
 
 Entry point del backend FastAPI. Despliega en Render free tier.
-
-Arranque local:
-    uvicorn hotelai.server:app --reload --port 8000
-
-Arranque producción:
-    uvicorn hotelai.server:app --host 0.0.0.0 --port $PORT
 """
 
 from __future__ import annotations
@@ -28,7 +22,7 @@ logging.basicConfig(level=settings.log_level)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):  # noqa: ARG001
+async def lifespan(app: FastAPI):
     logger.info(
         "hotelai starting · hotel=%s · models=concierge:%s, lifecycle:%s, haiku:%s",
         settings.hotel_name,
@@ -43,14 +37,13 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
 app = FastAPI(
     title="Hotel AI Concierge",
     description=(
-        "Sistema multi-agente para hotelería. "
-        "Proyecto Intermedio 1 · Universidad ORT Uruguay · 2026."
+        "Sistema multi-agente para hoteleria. "
+        "Proyecto Intermedio 1 - Universidad ORT Uruguay - 2026."
     ),
     version="0.1.0",
     lifespan=lifespan,
 )
 
-# CORS: solo permitimos el origen del simulador (portfolio del autor) + dev local.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -67,16 +60,23 @@ app.add_middleware(
     max_age=3600,
 )
 
-app.include_router(canal_router, prefix="/api/web-chat", tags=["canal · web_chat"])
-app.include_router(lifecycle_router, prefix="/api/lifecycle", tags=["lifecycle · triggers"])
+app.include_router(canal_router, prefix="/api/web-chat", tags=["canal-web_chat"])
+app.include_router(lifecycle_router, prefix="/api/lifecycle", tags=["lifecycle-triggers"])
 
 
 @app.get("/", tags=["meta"])
 def root() -> dict:
-    """Landing simple para verificar que el servicio está vivo."""
+    """Landing simple para verificar que el servicio esta vivo."""
     return {
         "service": "hotelai",
         "version": "0.1.0",
         "hotel": settings.hotel_name,
         "ok": True,
-   
+        "docs": "/docs",
+    }
+
+
+@app.get("/healthz", tags=["meta"])
+def healthz() -> dict:
+    """Liveness probe para Render."""
+    return {"ok": True}
