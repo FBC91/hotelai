@@ -1,0 +1,13 @@
+# Producción · pinneamos versiones mayores para build reproducible en Render.
+# Para dev usar pyproject.toml con `pip install -e .[dev]`.
+
+pydantic>=2.5,<3
+pydantic-settings>=2.1,<3
+langgraph>=0.2,<0.3
+anthropic>=0.34,<1
+supabase>=2.4,<3
+httpx>=0.27,<1
+python-dotenv>=1.0,<2
+structlog>=24.1,<25
+fastapi>=0.110,<1
+uvicorn[standard]>=0.30,<1

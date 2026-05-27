@@ -1,0 +1,66 @@
+[project]
+name = "hotelai"
+version = "0.1.0"
+description = "Sistema multi-agente para hotelería · Proyecto Intermedio 1 · Universidad ORT Uruguay 2026"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "Facundo Bolani" },
+    { name = "Alan Bancic" },
+    { name = "Alan Schein" },
+]
+dependencies = [
+    # Schemas y validación
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1",
+    # Orquestación de agentes
+    "langgraph>=0.2",
+    "langgraph-checkpoint-postgres>=2.0",
+    # LLM
+    "anthropic>=0.34",
+    # Estado compartido (Supabase / Postgres)
+    "supabase>=2.4",
+    "asyncpg>=0.29",
+    # Email (Gmail SMTP/IMAP para MVP)
+    "aiosmtplib>=3.0",
+    "aioimaplib>=1.0",
+    # Web (endpoint del simulador y webhooks)
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.30",
+    # Utilidades
+    "python-dotenv>=1.0",
+    "httpx>=0.27",
+    "structlog>=24.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "respx>=0.21",   # mock httpx
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["hotelai"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N", "SIM"]
+ignore = ["E501"]  # line length, lo controlamos con formatter
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true

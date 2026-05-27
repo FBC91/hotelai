@@ -1,0 +1,44 @@
+# Render Blueprint · https://render.com/docs/blueprint-spec
+# Al detectar este archivo, Render ofrece "Deploy from Blueprint" en 1 click.
+services:
+  - type: web
+    name: hotelai
+    runtime: python
+    region: oregon                       # más barato/gratis · simulador no es latencia-sensible
+    plan: free                            # cold start ~30s, sleep tras 15min inactividad
+    branch: main
+    rootDir: .
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn hotelai.server:app --host 0.0.0.0 --port $PORT --workers 1
+    healthCheckPath: /healthz
+    autoDeploy: true                      # push a main → autodeploy
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      # Secretos: setearlos en el dashboard de Render → Environment.
+      # No quedan en este archivo (queda público en GitHub).
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      # Defaults inofensivos (pueden ir en git):
+      - key: HOTEL_NAME
+        value: Hotel Bahía Serena
+      - key: TZ
+        value: America/Montevideo
+      - key: DEFAULT_LANGUAGE
+        value: es
+      - key: LOG_LEVEL
+        value: INFO
+      - key: LOG_FORMAT
+        value: json
+      - key: REFUND_AUTO_CAP_USD
+        value: "200"
+      - key: PAYMENT_REMINDER_HOURS
+        value: "6"
+      - key: PAYMENT_MAX_REMINDERS
+        value: "2"
+      - key: PAYMENT_HOLD_TTL_HOURS
+        value: "24"
