@@ -20,6 +20,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .canal.router import router as canal_router
+from .lifecycle_router import router as lifecycle_router
 from .settings import settings
 
 logger = logging.getLogger("hotelai")
@@ -67,6 +68,7 @@ app.add_middleware(
 )
 
 app.include_router(canal_router, prefix="/api/web-chat", tags=["canal · web_chat"])
+app.include_router(lifecycle_router, prefix="/api/lifecycle", tags=["lifecycle · triggers"])
 
 
 @app.get("/", tags=["meta"])
@@ -77,11 +79,4 @@ def root() -> dict:
         "version": "0.1.0",
         "hotel": settings.hotel_name,
         "ok": True,
-        "docs": "/docs",
-    }
-
-
-@app.get("/healthz", tags=["meta"])
-def healthz() -> dict:
-    """Liveness probe para Render."""
-    return {"ok": True}
+   

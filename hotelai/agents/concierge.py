@@ -45,7 +45,7 @@ from ..schemas import (
     ToneHint,
 )
 from ..settings import settings
-from . import reservas
+from . import lifecycle, reservas
 from .tools import db_tools as t
 
 logger = logging.getLogger("hotelai.concierge")
@@ -446,37 +446,35 @@ def _do_delegate_to_reservas(inbound: InboundMessage, ctx: GuestContext, args: d
 
 
 def _do_delegate_to_lifecycle(inbound: InboundMessage, args: dict) -> OutboundMessage:
-    # En Sprint 3 el Lifecycle no está implementado. Escalamos.
-    logger.info("lifecycle no implementado todavía — escalando trace=%s", inbound.trace_id)
-    return _do_escalate(inbound, {
-        "reason_code": "out_of_scope", "severity": "low",
-        "user_facing_message": (
-            "Te conecto con el equipo de atención para ayudarte con esto. "
-            "En breve te respondemos."
-        ),
-    })
-
-
-def _do_escalate(inbound: InboundMessage, args: dict) -> OutboundMessage:
-    reason_code = args.get("reason_code", "unknown_intent")
-    severity = args.get("severity", "med")
-    user_msg = args.get("user_facing_message") or "Te conecto con un miembro del equipo, un segundo."
-
-    sla_hours = {"critical": 0.05, "high": 0.5, "med": 1, "low": 8}.get(severity, 1)
+    """Delegación a Lifecycle: complain, upsell_accept, emotional_assessment."""
+    intent_raw = args.get("intent", "")
     try:
-        t.open_escalation(
-            conversation_id=str(inbound.conversation_id),
-            triggered_by="concierge",
-            reason_code=reason_code,
-            severity=severity,
-            reason_detail={"trace_id": str(inbound.trace_id),
-                           "raw_text_preview": inbound.raw_text[:200]},
-            sla_hours=int(max(sla_hours, 1)),
+        intent_enum = Intent(intent_raw)
+    except ValueError:
+        return _do_escalate(inbound, {
+            "reason_code": "unknown_intent", "severity": "med",
+            "user_facing_message": "Te conecto con el equipo, un segundo.",
+        })
+
+    # Cargamos guest_context (mismo flow que reservas)
+    guest_row = t.get_guest_for_conversation(str(inbound.conversation_id))
+    ctx = _build_guest_context(guest_row)
+
+    # Para complain / emotional_assessment usamos handle_emotional_assessment
+    if intent_enum in (Intent.COMPLAIN, Intent.EMOTIONAL_ASSESSMENT):
+        delegation = Delegation(
+            to_agent=AgentName.LIFECYCLE,
+            conversation_id=inbound.conversation_id,
+            guest_id=ctx.guest_id,
+            intent=intent_enum,
+            confidence=0.85,
+            task_brief=(args.get("task_brief") or "")[:500],
+            allowed_actions=["classify_sentiment", "open_escalation"],
+            constraints=Constraints(),
+            guest_context=ctx,
+            trace_id=inbound.trace_id,
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("no pude abrir escalation: %s", exc)
-
-    return _outbound(inbound, user_msg, tone=ToneHint.EMPATHETIC)
-
-
-__all__ = ["handle", "PROMPT_VERSION", "SYSTEM_PROMPT", "CONCIERGE_TOOLS"]
+        result = lifecycle.handle_emotional_assessment(delegation, inbound.raw_text)
+        if result.status == DelegationStatus.ESCALATE and result.escalation:
+            return _outbound(inbound, result.user_facing_message or
+     
