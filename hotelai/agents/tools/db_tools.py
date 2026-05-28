@@ -2,12 +2,8 @@
 hotelai.agents.tools.db_tools
 ==============================
 
-Funciones que los agentes invocan contra Supabase. Cada función es una "tool"
-en el sentido del threat model: tiene precondiciones, valida inputs, y
-retorna estructuras tipadas.
-
-NUNCA aceptan strings libres del huésped como parámetros. Los parámetros
-vienen del Concierge (que extrae con LLM y valida) o de scheduler events.
+Tools que los agentes invocan contra Supabase.
+v2: agrega find_reservation_by_short_code y rooms_status_overview.
 """
 
 from __future__ import annotations
@@ -21,13 +17,7 @@ from ...db import get_supabase
 logger = logging.getLogger("hotelai.tools")
 
 
-# =============================================================================
-# Static facts (Concierge respond_with_fact)
-# =============================================================================
-
-
 def get_static_fact(fact_key: str, lang: str = "es") -> str | None:
-    """Devuelve la versión multi-idioma de un fact o None si no existe."""
     sb = get_supabase()
     resp = sb.table("static_facts").select("values_by_lang").eq("fact_key", fact_key).execute()
     if not resp.data:
@@ -35,49 +25,22 @@ def get_static_fact(fact_key: str, lang: str = "es") -> str | None:
     return resp.data[0]["values_by_lang"].get(lang) or resp.data[0]["values_by_lang"].get("es")
 
 
-# =============================================================================
-# Availability + rates (Reservas)
-# =============================================================================
-
-
 def check_availability(check_in: str, check_out: str, category_id: str) -> list[dict[str, Any]]:
-    """Lista de habitaciones disponibles de `category_id` para el rango pedido.
-
-    Usa la vista v_room_availability (días marcados como 'available').
-    Una habitación se considera disponible si TODOS los días del rango aparecen
-    sin reserva activa.
-
-    Retorna: [{"room_id": uuid, "room_number": str}, ...]
-    """
     sb = get_supabase()
-
-    # Generamos una query SQL via PostgREST RPC. Como no tenemos RPC creada,
-    # vamos por el camino más simple: pedimos los rooms de la categoría y para
-    # cada uno chequeamos si hay overlap con reservas activas.
-    # Para una tabla de 80 rooms esto es trivial.
-
-    rooms_resp = sb.table("rooms").select("room_id, room_number").eq("category_id", category_id).eq("active", True).execute()
+    rooms_resp = sb.table("rooms").select("room_id, room_number") \
+        .eq("category_id", category_id).eq("active", True).execute()
     if not rooms_resp.data:
         return []
-
     room_ids = [r["room_id"] for r in rooms_resp.data]
-
-    # Reservas activas que SE SOLAPAN con el rango pedido
-    # solapamiento: existing.check_in < check_out AND existing.check_out > check_in
     busy = sb.table("reservations").select("room_id") \
         .in_("room_id", room_ids) \
         .in_("status", ["pending_payment", "confirmed", "checked_in"]) \
-        .lt("check_in", check_out) \
-        .gt("check_out", check_in) \
-        .execute()
+        .lt("check_in", check_out).gt("check_out", check_in).execute()
     busy_ids = {r["room_id"] for r in (busy.data or [])}
-
-    available = [r for r in rooms_resp.data if r["room_id"] not in busy_ids]
-    return available
+    return [r for r in rooms_resp.data if r["room_id"] not in busy_ids]
 
 
 def get_rate(category_id: str) -> float | None:
-    """Tarifa USD por noche para `category_id` (sin temporadas en MVP)."""
     sb = get_supabase()
     resp = sb.table("rates").select("price_usd").eq("category_id", category_id).execute()
     if not resp.data:
@@ -85,17 +48,10 @@ def get_rate(category_id: str) -> float | None:
     return float(resp.data[0]["price_usd"])
 
 
-# =============================================================================
-# Guests
-# =============================================================================
-
-
 def find_guest(email: str | None = None, phone: str | None = None) -> dict[str, Any] | None:
-    """Busca huésped por email o phone. None si no existe."""
     sb = get_supabase()
-    q = sb.table("guests").select("*")
     if email:
-        resp = q.eq("email", email.lower()).limit(1).execute()
+        resp = sb.table("guests").select("*").eq("email", email.lower()).limit(1).execute()
         if resp.data:
             return resp.data[0]
     if phone:
@@ -105,14 +61,8 @@ def find_guest(email: str | None = None, phone: str | None = None) -> dict[str, 
     return None
 
 
-def upsert_guest(
-    *,
-    full_name: str | None = None,
-    email: str | None = None,
-    phone: str | None = None,
-    language_pref: str = "es",
-) -> dict[str, Any]:
-    """Crea o actualiza huésped por email/phone. Retorna fila."""
+def upsert_guest(*, full_name: str | None = None, email: str | None = None,
+                 phone: str | None = None, language_pref: str = "es") -> dict[str, Any]:
     existing = find_guest(email=email, phone=phone)
     sb = get_supabase()
     if existing:
@@ -128,7 +78,7 @@ def upsert_guest(
             existing.update(updates)
         return existing
 
-    payload = {
+    payload: dict[str, Any] = {
         "full_name": full_name,
         "language_pref": language_pref,
         "consent_marketing": False,
@@ -141,38 +91,18 @@ def upsert_guest(
     return resp.data[0]
 
 
-# =============================================================================
-# Reservations
-# =============================================================================
-
-
-def create_reservation(
-    *,
-    guest_id: str,
-    room_id: str,
-    check_in: str,
-    check_out: str,
-    total_amount_usd: float,
-    n_adults: int = 1,
-    n_children: int = 0,
-    payment_hold_hours: int = 24,
-) -> dict[str, Any]:
-    """Crea reserva en estado pending_payment. Hold de N horas para el cuarto."""
-    sb = get_supabase()
+def create_reservation(*, guest_id: str, room_id: str, check_in: str, check_out: str,
+                       total_amount_usd: float, n_adults: int = 1, n_children: int = 0,
+                       payment_hold_hours: int = 24) -> dict[str, Any]:
     from datetime import datetime, timedelta, timezone
-
+    sb = get_supabase()
     hold_until = (datetime.now(timezone.utc) + timedelta(hours=payment_hold_hours)).isoformat()
     payload = {
-        "guest_id": guest_id,
-        "room_id": room_id,
-        "check_in": check_in,
-        "check_out": check_out,
-        "status": "pending_payment",
-        "payment_status": "pending",
-        "total_amount_usd": total_amount_usd,
-        "source": "direct",
-        "n_adults": n_adults,
-        "n_children": n_children,
+        "guest_id": guest_id, "room_id": room_id,
+        "check_in": check_in, "check_out": check_out,
+        "status": "pending_payment", "payment_status": "pending",
+        "total_amount_usd": total_amount_usd, "source": "direct",
+        "n_adults": n_adults, "n_children": n_children,
         "payment_hold_until": hold_until,
     }
     resp = sb.table("reservations").insert(payload).execute()
@@ -180,55 +110,78 @@ def create_reservation(
 
 
 def get_reservation(reservation_id: str, guest_id: str | None = None) -> dict[str, Any] | None:
-    """Lee una reserva. Si se pasa guest_id, valida pertenencia."""
     sb = get_supabase()
     q = sb.table("reservations").select("*").eq("reservation_id", reservation_id).limit(1).execute()
     if not q.data:
         return None
     row = q.data[0]
     if guest_id and row["guest_id"] != guest_id:
-        # Guard: no devolver reservas de otros guests
-        logger.warning("attempt to read reservation of another guest (rid=%s, requested by guest=%s)",
-                       reservation_id, guest_id)
         return None
     return row
+
+
+def find_reservation_by_short_code(short_code: str, guest_id: str | None = None) -> dict[str, Any] | None:
+    """
+    Busca una reserva por prefijo de UUID (primeros 8+ chars que el huesped suele recordar).
+    Si guest_id se pasa, valida pertenencia.
+
+    Ejemplo: short_code='54e2309e' encuentra '54e2309e-1234-...'.
+    """
+    sb = get_supabase()
+    code = (short_code or "").strip().lower()
+    if len(code) < 6:
+        return None
+    # PostgREST no soporta LIKE prefix directamente con UUID, asi que listamos
+    # las del guest y matcheamos en cliente. Acotado a 50 resultados.
+    if guest_id:
+        rows = sb.table("reservations").select("*") \
+            .eq("guest_id", guest_id).limit(50).execute().data or []
+    else:
+        rows = sb.table("reservations").select("*") \
+            .order("created_at", desc=True).limit(50).execute().data or []
+    for r in rows:
+        if r["reservation_id"].lower().startswith(code):
+            return r
+    return None
 
 
 def list_reservations_for_guest(guest_id: str, limit: int = 5) -> list[dict[str, Any]]:
     sb = get_supabase()
     resp = sb.table("reservations").select(
         "reservation_id, check_in, check_out, status, payment_status, total_amount_usd, room_id"
-    ).eq("guest_id", guest_id).order("check_in", desc=False).limit(limit).execute()
+    ).eq("guest_id", guest_id).order("check_in").limit(limit).execute()
     return resp.data or []
 
 
 def mark_reservation_paid(reservation_id: str) -> dict[str, Any] | None:
-    """Marca una reserva como confirmada y paga (flujo manual 'ya pagué')."""
     sb = get_supabase()
     resp = sb.table("reservations").update({
-        "status": "confirmed",
-        "payment_status": "paid",
+        "status": "confirmed", "payment_status": "paid",
     }).eq("reservation_id", reservation_id).eq("status", "pending_payment").execute()
     return (resp.data or [None])[0]
 
 
-# =============================================================================
-# Conversations / messages helpers
-# =============================================================================
+def cancel_reservation(reservation_id: str, guest_id: str | None = None) -> dict[str, Any] | None:
+    from datetime import datetime, timezone
+    sb = get_supabase()
+    q = sb.table("reservations").update({
+        "status": "cancelled",
+        "cancelled_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("reservation_id", reservation_id)
+    if guest_id:
+        q = q.eq("guest_id", guest_id)
+    resp = q.execute()
+    return (resp.data or [None])[0]
 
 
 def get_conversation_history(conversation_id: str, limit: int = 8) -> list[dict[str, Any]]:
-    """Últimos N mensajes de la conversación, en orden cronológico (más viejo primero)."""
     sb = get_supabase()
-    resp = sb.table("messages").select(
-        "direction, role, agent_name, content, created_at"
-    ).eq("conversation_id", conversation_id).order("created_at", desc=True).limit(limit).execute()
-    msgs = list(reversed(resp.data or []))
-    return msgs
+    resp = sb.table("messages").select("direction, role, agent_name, content, created_at") \
+        .eq("conversation_id", conversation_id).order("created_at", desc=True).limit(limit).execute()
+    return list(reversed(resp.data or []))
 
 
 def get_guest_for_conversation(conversation_id: str) -> dict[str, Any] | None:
-    """Devuelve el guest asociado a una conversación, si existe."""
     sb = get_supabase()
     conv = sb.table("conversations").select("guest_id").eq("conversation_id", conversation_id).limit(1).execute()
     if not conv.data or not conv.data[0].get("guest_id"):
@@ -239,28 +192,13 @@ def get_guest_for_conversation(conversation_id: str) -> dict[str, Any] | None:
 
 
 def attach_guest_to_conversation(conversation_id: str, guest_id: str) -> None:
-    """Asocia un guest a una conversación (cuando se identifica mid-flow)."""
-    sb = get_supabase()
-    sb.table("conversations").update({"guest_id": guest_id}).eq("conversation_id", conversation_id).execute()
+    get_supabase().table("conversations").update({"guest_id": guest_id}).eq("conversation_id", conversation_id).execute()
 
 
-# =============================================================================
-# Escalations
-# =============================================================================
-
-
-def open_escalation(
-    *,
-    conversation_id: str,
-    triggered_by: str,
-    reason_code: str,
-    severity: str,
-    reason_detail: dict[str, Any] | None = None,
-    sla_hours: int = 1,
-) -> dict[str, Any]:
-    """Abre escalation + marca la conversación como escalated_human."""
+def open_escalation(*, conversation_id: str, triggered_by: str, reason_code: str,
+                    severity: str, reason_detail: dict[str, Any] | None = None,
+                    sla_hours: int = 1) -> dict[str, Any]:
     from datetime import datetime, timedelta, timezone
-
     sb = get_supabase()
     sla_due = (datetime.now(timezone.utc) + timedelta(hours=sla_hours)).isoformat()
     payload = {
@@ -274,24 +212,63 @@ def open_escalation(
     }
     resp = sb.table("escalations").insert(payload).execute()
     sb.table("conversations").update({
-        "state": "escalated_human",
-        "last_agent": "human",
+        "state": "escalated_human", "last_agent": "human",
     }).eq("conversation_id", conversation_id).execute()
     return resp.data[0]
 
 
+def rooms_status_overview() -> dict[str, Any]:
+    """
+    Vista en vivo de las 80 habitaciones para mostrar en el simulador.
+
+    Devuelve:
+      {
+        "today": "YYYY-MM-DD",
+        "rooms": [{"room_id", "room_number", "category_id", "floor",
+                    "status_today": "available|pending_payment|confirmed|checked_in"}],
+        "summary": {category_id: {"total": N, "available": M, ...}}
+      }
+    """
+    sb = get_supabase()
+    today = date.today().isoformat()
+
+    rooms = sb.table("rooms").select("room_id, room_number, category_id, floor") \
+        .eq("active", True).order("room_number").execute().data or []
+
+    # Reservas activas que incluyen hoy
+    today_res = sb.table("reservations").select("room_id, status") \
+        .in_("status", ["pending_payment", "confirmed", "checked_in"]) \
+        .lte("check_in", today).gt("check_out", today).execute().data or []
+    by_room = {r["room_id"]: r["status"] for r in today_res}
+
+    out_rooms = []
+    summary: dict[str, dict[str, int]] = {}
+    for r in rooms:
+        st = by_room.get(r["room_id"], "available")
+        out_rooms.append({
+            "room_id": r["room_id"],
+            "room_number": r["room_number"],
+            "category_id": r["category_id"],
+            "floor": r["floor"],
+            "status_today": st,
+        })
+        cat = r["category_id"]
+        summary.setdefault(cat, {"total": 0, "available": 0, "pending_payment": 0,
+                                  "confirmed": 0, "checked_in": 0})
+        summary[cat]["total"] += 1
+        summary[cat][st] = summary[cat].get(st, 0) + 1
+
+    return {"today": today, "rooms": out_rooms, "summary": summary}
+
+
 __all__ = [
     "get_static_fact",
-    "check_availability",
-    "get_rate",
-    "find_guest",
-    "upsert_guest",
-    "create_reservation",
-    "get_reservation",
-    "list_reservations_for_guest",
-    "mark_reservation_paid",
-    "get_conversation_history",
-    "get_guest_for_conversation",
+    "check_availability", "get_rate",
+    "find_guest", "upsert_guest",
+    "create_reservation", "get_reservation", "find_reservation_by_short_code",
+    "list_reservations_for_guest", "mark_reservation_paid", "cancel_reservation",
+    "get_conversation_history", "get_guest_for_conversation",
     "attach_guest_to_conversation",
     "open_escalation",
+    "rooms_status_overview",
 ]
